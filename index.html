@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<title>조명 미리보기</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<!-- Template for make_preview.py (the page JSON replaces the PAGE_JSON marker).
+     Local page (index.html): plays the song library's audio files in place; they must never be uploaded or shared.
+     Share page (share.html, --share-out): no audio at all; the light data is inlined and an embedded YouTube player
+     (the same upload the library was made from, so the times match) drives the light through the IFrame API. It needs
+     a host that allows YouTube iframes (a claude.ai artifact does not; a local http server or a static web host does).
+     Always dark on purpose: a lit door strip is judged at night. -->
+<style>
+  /* layout: a song list beside one stage (two doors, the whole-song strips, a close-up, the places to look) */
+  :root {
+    --bg: #0a0b0d; --panel: #131519; --panel2: #191c21; --line: #23262c; --text: #e9e9ec; --muted: #9b9ea6;
+    --faint: #6c6f77; --accent: #f0c36a; --accent-line: #5a4a26; --accent-bg: #2a2416;
+    --ballad: #9c8cff; --rhythm: #ff9f4a; --neutral: #6b6e76; --idle: #2a2c31; --error: #ff8a7a;
+    --font: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Segoe UI", sans-serif;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  /* render mode (preview/record.py): a video frame, no list / player / notes, the time large */
+  .rtime { display: none; }
+  body.render aside, body.render audio, body.render .settings, body.render #marksTitle, body.render #marks,
+  body.render .legend, body.render .ctl, body.render .ytwrap { display: none !important; }
+  body.render .app { grid-template-columns: minmax(0, 1fr); }
+  body.render main { max-width: 1000px; margin: 0 auto; padding-left: 0; padding-block: 30px 16px; }
+  body.render .door { max-width: none; }
+  body.render .panel { max-height: none; aspect-ratio: 2 / 1; }
+  body.render .rtime { display: block; margin: 8px 0 0; font: 600 24px var(--mono); color: var(--accent); }
+  body.render #meta, body.render #note { display: none; }
+  body.render .head h2 { font-size: 40px; }
+  body.render .doors { margin-top: 22px; }
+  body.render .spk { max-width: 220px; }
+  body.render .spkwash { max-width: 320px; }
+  body.render .strip { height: 6px; }
+  body.render .info { padding: 16px 22px 18px; }
+  body.render .ver b { font-size: 19px; } body.render .ver span { font-size: 15px; }
+  body.render .state { font-size: 26px; margin-top: 8px; } body.render .detail { font-size: 17px; } body.render .stats { display: none; }
+  body.render h3 { font-size: 16px; margin: 26px 0 10px; }
+  body.render .ov canvas { height: 72px; } body.render .zm canvas { height: 72px; }
+  body.render .row { grid-template-columns: 110px minmax(0, 1fr); }
+  body.render .row .lab { font-size: 14px; }   /* .ctl / .ytwrap set display; the attribute must still win */
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .app { display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 100vh;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  aside { border-right: 1px solid var(--line); padding-block: 20px 40px; padding-right: 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  aside h1 { font-size: 17px; margin: 0 8px 2px; letter-spacing: -0.01em; text-wrap: balance; }
+  aside .sub { margin: 0 8px 16px; color: var(--muted); font-size: 12px; }
+  .group { margin: 14px 8px 4px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+  .song { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; background: none; border: 0;
+    border-radius: 7px; padding: 6px 8px; cursor: pointer; }
+  .song:hover { background: var(--panel); }
+  .song.on { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
+  .song .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .song .a { color: var(--muted); font-size: 12px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; transform: translateY(-1px); }
+  main { padding-block: 22px 60px; padding-left: 28px; max-width: 1180px; width: 100%; min-width: 0; }
+  .head h2 { margin: 0; font-size: 24px; letter-spacing: -0.02em; text-wrap: balance; }
+  .head .meta { margin: 4px 0 0; color: var(--muted); }
+  .head .note { margin: 2px 0 0; color: var(--faint); font-size: 12px; }
+  audio { width: 100%; margin: 16px 0 6px; height: 40px; }
+  .head { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: flex-start; }
+  .head-text { flex: 1 1 320px; min-width: 0; }
+  /* YouTube's smallest allowed player (200 px high): the sound source, controlled from the page */
+  .ytwrap { flex: 0 0 auto; width: 356px; height: 200px; max-width: 100%; border-radius: 10px; overflow: hidden;
+    background: #000; border: 1px solid var(--line); }
+  .ytwrap iframe, .ytwrap #yt { display: block; width: 100%; height: 100%; border: 0; }
+  .ctl { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+  .ctl button { background: var(--accent-bg); color: var(--accent); border: 1px solid var(--accent-line); border-radius: 8px;
+    padding: 7px 18px; cursor: pointer; font-weight: 600; }
+  .ctl button:hover { background: #3a3120; }
+  .ctl .time { font: 14px var(--mono); color: var(--muted); }
+  .ctl .sub { background: var(--panel2); color: var(--text); border-color: var(--line); font-weight: 400; padding: 7px 12px; }
+  .ctl a.ytl { color: var(--accent); border: 1px solid var(--accent-line); border-radius: 8px; padding: 6px 12px; text-decoration: none; }
+  .howto { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+  .credit { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+  .credit a { color: inherit; }
+  .doors { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 18px; margin-top: 14px; }
+  .door { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; max-width: 880px; }
+  .panel { position: relative; aspect-ratio: 1.85 / 1; max-height: 480px; overflow: hidden;   /* a front door's proportions */
+    background: radial-gradient(120% 90% at 30% 0%, #1b1d22 0%, #0e0f12 60%, #08090a 100%); }
+  /* door trim: an upper panel with the light strip in its groove, an armrest below */
+  .trim { position: absolute; left: 4%; right: 4%; top: 12%; height: 44%; border-radius: 18px 60px 16px 16px;
+    background: linear-gradient(180deg, #17191d 0%, #111215 100%); box-shadow: inset 0 1px 0 #24272d, inset 0 -8px 18px #0005; }
+  .arm { position: absolute; left: 34%; right: 18%; bottom: 14%; height: 14%; border-radius: 12px 12px 24px 24px;
+    background: linear-gradient(180deg, #1a1c20, #0f1013); box-shadow: inset 0 1px 0 #26292f; }
+  .handle { position: absolute; right: 9%; top: 40%; width: 11%; height: 6%; border-radius: 8px;
+    background: linear-gradient(180deg, #2b2e34, #16181b); box-shadow: inset 0 1px 0 #3a3e45; }
+  .wash { position: absolute; left: 5%; right: 5%; top: 33%; height: 40%; opacity: 0; border-radius: 50% 50% 0 0 / 30% 30% 0 0; }
+  .wash.up { top: 9%; height: 24%; border-radius: 0 0 50% 50% / 0 0 30% 30%; }
+  .strip { position: absolute; left: 7%; right: 7%; top: 32%; height: 4px; border-radius: 3px; background: #1d1e21; }
+  /* the door speaker low in front, with the ambient ring around it (one zone: same colour as the strip) */
+  .spk { position: absolute; left: 9%; bottom: 7%; width: 34%; max-width: 128px; aspect-ratio: 1; border-radius: 50%;
+    background: radial-gradient(circle, #1a1c20 0 30%, #101114 31% 100%); box-shadow: inset 0 0 0 1px #24272d, inset 0 6px 14px #0008; }
+  .spk::after { content: ""; position: absolute; inset: 14%; border-radius: 50%;
+    background-image: radial-gradient(#2b2e34 1px, transparent 1.6px); background-size: 7px 7px; opacity: .8; }
+  .ring { position: absolute; inset: -5px; border-radius: 50%; border: 3px solid #1d1e21; }
+  .spkwash { position: absolute; left: 3%; bottom: 0; width: 46%; max-width: 190px; aspect-ratio: 1; border-radius: 50%; opacity: 0; }
+  .info { padding: 12px 16px 14px; border-top: 1px solid var(--line); }
+  .ver { display: flex; gap: 8px; align-items: baseline; }
+  .ver b { font-size: 15px; }
+  .ver span { color: var(--muted); font-size: 12px; }
+  .state { margin-top: 6px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; min-height: 24px; }
+  .detail { color: var(--muted); font-size: 13px; min-height: 20px; font-variant-numeric: tabular-nums; }
+  .stats { color: var(--faint); font-size: 12px; margin-top: 6px; }
+  h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 28px 0 8px; }
+  h3 small { font-weight: 400; color: var(--faint); margin-left: 6px; }
+  .tl { position: relative; user-select: none; }
+  .row { display: grid; grid-template-columns: 78px minmax(0, 1fr); align-items: center; gap: 10px; margin-bottom: 6px; }
+  .row .lab { color: var(--muted); font-size: 12px; text-align: right; line-height: 1.25; }
+  .row .lab span { display: block; color: var(--faint); font-size: 11px; }
+  canvas { display: block; width: 100%; border-radius: 6px; background: #0d0e10; }
+  .ov canvas { height: 52px; cursor: pointer; touch-action: none; }
+  .zm canvas { height: 46px; }
+  .mrow { position: relative; height: 22px; }
+  .mk { position: absolute; top: 0; transform: translateX(-50%); min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+    border: 1px solid var(--accent-line); background: var(--accent-bg); color: var(--accent); font-size: 11px; line-height: 18px; cursor: pointer; }
+  .mk:hover { background: #3a3120; }
+  .head-bar { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 6px #fff8; pointer-events: none; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--faint); font-size: 12px; margin: 2px 0 0 88px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  ol.marks { margin: 0; padding: 0; list-style: none; }
+  ol.marks li { display: flex; gap: 10px; align-items: baseline; padding: 7px 10px; border-radius: 8px; cursor: pointer; }
+  ol.marks li:hover { background: var(--panel); }
+  ol.marks .n { color: var(--accent); font-variant-numeric: tabular-nums; min-width: 66px; }
+  .empty { color: var(--faint); }
+  .settings { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 26px; }
+  .settings input[type=range] { width: 180px; vertical-align: middle; accent-color: var(--accent); }
+  .settings .v { color: var(--text); font-variant-numeric: tabular-nums; min-width: 52px; display: inline-block; }
+  .err { color: var(--error); margin-top: 6px; }
+  kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: minmax(0, 1fr); }
+    aside { position: static; height: auto; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); padding-right: 0; padding-block: 16px 12px; }
+    main { padding-left: 0; padding-block: 16px 40px; }
+    .row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .row .lab { text-align: left; }
+    .row .lab span { display: inline; margin-left: 6px; }
+    .legend { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1 id="heading">조명 미리보기</h1>
+    <p class="sub" id="intro">차의 조명 코드를 맥에서 그대로 돌린 결과</p>
+    <nav id="list"></nav>
+  </aside>
+  <main>
+    <div class="head">
+      <div class="head-text">
+        <h2 id="title">곡을 고르세요</h2>
+        <p class="meta" id="meta"></p>
+        <p class="note" id="note"></p>
+        <p class="rtime" id="rtime"></p>
+        <div class="ctl" id="ctl" hidden>
+          <button id="pp">▶ 재생</button>
+          <span class="time" id="time">0:00 / 0:00</span>
+          <span id="filectl" hidden>
+            <button class="sub" id="back" title="조명을 0.1초 앞으로 (단축키 ,)">−0.1초</button>
+            <button class="sub" id="fwd" title="조명을 0.1초 뒤로 (단축키 .)">+0.1초</button>
+            <button class="sub" id="count">3초 뒤 시작</button>
+            <a class="ytl" id="ytl" href="#" target="_blank" rel="noopener">유튜브에서 듣기 ↗</a>
+          </span>
+        </div>
+        <p class="credit" id="credit" hidden></p>
+        <p class="howto" id="howto" hidden>파일로 열면 유튜브가 페이지 안에서 재생되지 않아요(유튜브 제한). ① "유튜브에서 듣기"로 같은 시점을 열어 일시정지 ② "3초 뒤 시작"을 누르고 0이 되는 순간 유튜브 재생 ③ 어긋나 보이면 ±0.1초로 맞추기.</p>
+      </div>
+      <div class="ytwrap" id="ytwrap" hidden><div id="yt"></div></div>
+    </div>
+    <audio id="audio" controls preload="auto"></audio>
+    <div class="err" id="err" hidden></div>
+    <section class="doors" id="doors"></section>
+
+    <h3>곡 전체 <small>막대 높이 = 밝기, 색 = 조명 색, 아래 띠 = 판단한 모드 · 누르면 그 위치로 이동</small></h3>
+    <div class="tl ov" id="overview"></div>
+    <div class="legend">
+      <span><i style="background:var(--ballad)"></i>발라드 (밝기로 표현)</span>
+      <span><i style="background:var(--rhythm)"></i>리듬 (색으로 박자)</span>
+      <span><i style="background:var(--neutral)"></i>곡 파악 중</span>
+      <span><i style="background:var(--idle)"></i>소리 없음</span>
+    </div>
+
+    <h3>지금 앞뒤 6초 <small>가운데 흰 선이 지금</small></h3>
+    <div class="tl zm" id="zoom"></div>
+
+    <h3 id="marksTitle">확인할 곳</h3>
+    <ol class="marks" id="marks"></ol>
+
+    <div class="settings">
+      <label id="lagwrap">조명 늦추기 <input type="range" id="lag" min="0" max="400" step="10"> <span class="v" id="lagv"></span>
+        <span>블루투스 이어폰이면 소리가 늦게 나요. 조명이 먼저 바뀌어 보이면 오른쪽으로. 맥 스피커는 0.</span></label>
+      <span><kbd>space</kbd> 재생/정지 · <kbd>←</kbd><kbd>→</kbd> 5초 이동</span>
+    </div>
+  </main>
+</div>
+<!--SHARE_DATA-->
+<script>
+"use strict";
+const P = {"noMarkers": true, "versions": ["dj", "dj-strong", "mood", "rhythm", "mono", "custom"], "tags": ["인공지능 DJ · 암전 끔", "인공지능 DJ · 암전 강 (0·3·5)", "무드", "비트", "단색 (파랑·암전 약)", "커스텀 예시 (빨강+파랑·색 느리게·흰색 끔)"], "audioRel": "audio", "audioExt": "mp3", "syncMs": 70, "note": "앱 설정 floor=0 peak=10 · 싱크 70 ms · 음악: CC BY 4.0 (CREDITS.md)", "first": [], "genres": [["ballad", "발라드 (드럼 없음)"], ["ballad_drums", "발라드 (드럼 있음)"], ["acoustic", "어쿠스틱"], ["kpop", "K-pop"], ["pop", "팝"], ["funk", "펑크"], ["edm", "EDM"], ["hiphop", "힙합"], ["rock", "록"], ["rnb", "R&B"]], "songs": [{"id": "jwc_woodward_better_days", "artist": "Josh Woodward", "title": "Better Days", "genre": "ballad", "expected": "ballad", "certainty": "firm", "bpm": "120", "note": "피아노 + 남자 보컬, 드럼 없음", "duration": 212.5, "markers": [], "yt": "", "credit": "\"Better Days\" by Josh Woodward", "licence": "CC BY 4.0", "source": "https://www.joshwoodward.com/song/BetterDays"}, {"id": "jwc_woodward_the_box", "artist": "Josh Woodward", "title": "The Box", "genre": "ballad_drums", "expected": "ballad", "certainty": "firm", "bpm": "73", "note": "피아노·기타 + 보컬, 1:40쯤 부드러운 드럼이 들어왔다 3:35쯤 빠짐", "duration": 292.0, "markers": [], "yt": "", "credit": "\"The Box\" by Josh Woodward", "licence": "CC BY 4.0", "source": "https://www.joshwoodward.com/song/TheBox"}, {"id": "jwc_woodward_shadows_in_the_moonlight", "artist": "Josh Woodward", "title": "Shadows in the Moonlight", "genre": "acoustic", "expected": "ballad", "certainty": "firm", "bpm": "84", "note": "어쿠스틱 기타 + 보컬", "duration": 265.8, "markers": [], "yt": "", "credit": "\"Shadows in the Moonlight\" by Josh Woodward", "licence": "CC BY 4.0", "source": "https://www.joshwoodward.com/song/ShadowsintheMoonlight"}, {"id": "jwc_woodward_circle_k", "artist": "Josh Woodward", "title": "Circle K", "genre": "pop", "expected": "rhythm", "certainty": "firm", "bpm": "109", "note": "경쾌한 팝록, 보컬, 일정한 드럼 109 BPM", "duration": 242.3, "markers": [], "yt": "", "credit": "\"Circle K\" by Josh Woodward", "licence": "CC BY 4.0", "source": "https://www.joshwoodward.com/song/CircleK"}, {"id": "fma_cullah_moonlove_funk", "artist": "Cullah", "title": "Moonlove Funk", "genre": "funk", "expected": "rhythm", "certainty": "firm", "bpm": "92", "note": "펑크·소울, 남자 보컬", "duration": 199.7, "markers": [], "yt": "", "credit": "\"Moonlove Funk\" by Cullah", "licence": "CC BY 4.0", "source": "https://freemusicarchive.org/music/MC_Cullah/Cullahsus/01%20-%20Moonlove_Funk/"}, {"id": "inc_macleod_go_cart", "artist": "Kevin MacLeod", "title": "Go Cart", "genre": "edm", "expected": "rhythm", "certainty": "firm", "bpm": "115", "note": "연주곡 EDM, 빌드업 후 0:58 첫 드롭", "duration": 212.9, "markers": [], "yt": "", "credit": "\"Go Cart\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0", "licence": "CC BY 4.0", "source": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1300006"}, {"id": "fma_cullah_bradycardia", "artist": "Cullah", "title": "Bradycardia", "genre": "hiphop", "expected": "rhythm", "certainty": "firm", "bpm": "96", "note": "블루스풍 힙합, 남자 보컬", "duration": 265.0, "markers": [], "yt": "", "credit": "\"Bradycardia\" by Cullah", "licence": "CC BY 4.0", "source": "https://freemusicarchive.org/music/MC_Cullah/Trinity/03_-_Bradycardia/"}, {"id": "jwc_woodward_the_vagabond", "artist": "Josh Woodward", "title": "The Vagabond", "genre": "rock", "expected": "rhythm", "certainty": "firm", "bpm": "128", "note": "풀밴드 하드록, 보컬, 조용한 도입 후 드럼 시작", "duration": 267.4, "markers": [], "yt": "", "credit": "\"The Vagabond\" by Josh Woodward", "licence": "CC BY 4.0", "source": "https://www.joshwoodward.com/song/TheVagabond"}, {"id": "inc_macleod_getting_it_done", "artist": "Kevin MacLeod", "title": "Getting it Done", "genre": "edm", "expected": "rhythm", "certainty": "firm", "bpm": "135", "note": "연주곡 빠른 신스 댄스 135 BPM", "duration": 209.8, "markers": [], "yt": "", "credit": "\"Getting it Done\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0", "licence": "CC BY 4.0", "source": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1800004"}, {"id": "inc_macleod_basic_implosion", "artist": "Kevin MacLeod", "title": "Basic Implosion", "genre": "hiphop", "expected": "rhythm", "certainty": "firm", "bpm": "95", "note": "연주곡 힙합 비트, 1:38~1:58 드럼이 멈췄다 다시 시작", "duration": 189.5, "markers": [], "yt": "", "credit": "\"Basic Implosion\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0", "licence": "CC BY 4.0", "source": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1600032"}, {"id": "inc_macleod_style_funk", "artist": "Kevin MacLeod", "title": "Style Funk", "genre": "funk", "expected": "rhythm", "certainty": "firm", "bpm": "100", "note": "연주곡 펑크, 브라스 스탭, 0:48·3:22쯤 멈춤 박자", "duration": 307.3, "markers": [], "yt": "", "credit": "\"Style Funk\" Kevin MacLeod (incompetech.com) · Licensed under Creative Commons: By Attribution 4.0", "licence": "CC BY 4.0", "source": "https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100058"}]};
+window.PREVIEW_DATA = window.PREVIEW_DATA || {};
+const SHARE = !!P.share;
+const $ = (s) => document.querySelector(s);
+const audio = $("#audio");
+const V = P.versions;
+
+const MODE_KO = { neutral: "곡 파악 중", ballad: "발라드", rhythm: "리듬", idle: "소리 없음" };
+const PART_KO = {
+  smooth: "밝기로 표현", soft: "부드러운 구간 · 밝기로 표현", backbeat: "2·4박에 색 바뀜", beat: "박자마다 2색",
+  high: "박자마다 4색", free: "4박마다 색 (박자 불확실)", breakdown: "쉬어가기 · 차 페이드 켬", build: "고조",
+  drop: "드롭 · 흰색", stop: "멈춤 · 암전", silent: "무음 · 어둡게",
+};
+const STYLE_KO = { ballad: "발라드", groove: "그루브", funk: "펑크", edm: "EDM", "-": "미정" };
+const LEVEL_KO = { INTRO: "인트로", LOW: "낮은 구간", MID: "중간 구간", HIGH: "가장 센 구간", BREAKDOWN: "쉬어가는 구간",
+  BUILD: "고조 구간", DROP: "드롭", STOP: "멈춤", "-": "구간 미정" };
+const EXPECT_KO = { ballad: "발라드", rhythm: "리듬" };
+const MODE_COL = { ballad: "#9c8cff", rhythm: "#ff9f4a", neutral: "#6b6e76", idle: "#2a2c31" };
+
+// ---------------- the player: the song file (local page) or an embedded YouTube player (share page) ----------------
+/** YouTube IFrame API; getCurrentTime() can repeat a value between its updates, so the clock runs on from the last
+ *  change while playing. */
+const ytPlayer = {
+  p: null, ready: false, playing: false, lastT: -1, lastAt: 0, want: null,
+  time() {
+    if (!this.ready) return 0;
+    const t = this.p.getCurrentTime() || 0, now = performance.now();
+    if (t !== this.lastT) { this.lastT = t; this.lastAt = now; return t; }
+    return this.playing ? t + Math.min(1, (now - this.lastAt) / 1000) : t;
+  },
+  play() { if (this.ready) this.p.playVideo(); },
+  pause() { if (this.ready) this.p.pauseVideo(); },
+  seek(t) { if (this.ready) { this.p.seekTo(Math.max(0, t), true); this.lastT = -1; } },
+  paused() { return !this.playing; },
+  load(id) {
+    if (!id) { showErr("이 곡은 유튜브 영상 정보가 없어요."); return; }
+    if (this.ready) { this.p.cueVideoById(id); this.lastT = -1; return; }
+    this.want = id;
+    if (window.YT && window.YT.Player) this.create();
+  },
+  create() {
+    if (this.p || !this.want) return;
+    this.p = new YT.Player("yt", {
+      videoId: this.want, width: 356, height: 200, playerVars: { playsinline: 1, rel: 0 },
+      events: {
+        onReady: () => { this.ready = true; },
+        onStateChange: (e) => { this.playing = e.data === YT.PlayerState.PLAYING; this.lastT = -1; },
+        onError: (e) => showErr(e.data === 101 || e.data === 150 ? "이 영상은 다른 사이트에서 재생할 수 없게 막혀 있어요. 유튜브에서 직접 들으면서 보세요."
+          : "유튜브 영상을 불러오지 못했어요 (오류 " + e.data + ")."),
+      },
+    });
+  },
+};
+window.onYouTubeIframeAPIReady = () => ytPlayer.create();
+/** A page opened as a file cannot host YouTube (error 153: no referrer), so it plays the light on a clock beside
+ *  YouTube in another tab, lined up with a countdown and nudges. */
+const clockPlayer = {
+  on: false, base: 0, at: 0, dur: 0,
+  time() { return this.on ? this.base + (performance.now() - this.at) / 1000 : this.base; },
+  play() { if (!this.on) { this.at = performance.now(); this.on = true; } },
+  pause() { this.base = this.time(); this.on = false; },
+  seek(t) { this.base = Math.max(0, this.dur ? Math.min(t, this.dur) : t); this.at = performance.now(); },
+  paused() { return !this.on; },
+  load() {},
+};
+const FILE_MODE = SHARE && location.protocol === "file:";
+const audioPlayer = {
+  time() { return audio.currentTime; },
+  play() { audio.play().catch(() => {}); },
+  pause() { audio.pause(); },
+  seek(t) { audio.currentTime = Math.max(0, t); },
+  paused() { return audio.paused; },
+};
+const player = FILE_MODE ? clockPlayer : SHARE ? ytPlayer : audioPlayer;
+function toggle() { player.paused() ? player.play() : player.pause(); }
+
+let lagMs = 0;
+try { lagMs = +(localStorage.getItem("lightPreviewLagMs") || 0); } catch (e) { lagMs = 0; }
+
+let cur = null;        // { meta, data, dur }
+let doors = [];        // per version: elements + displayed light
+let ovCanvases = [], zmCanvases = [], playheads = [];
+
+function intensity(b) { return b <= 0 ? 0 : 0.1 + 0.9 * Math.pow((b - 1) / 9, 1.5); }
+function rgb(h) { if (!h) return [0, 0, 0]; const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function clock(s) { s = Math.max(0, s); const m = Math.floor(s / 60); const r = s - m * 60; return m + ":" + (r < 10 ? "0" : "") + r.toFixed(1); }
+function find(ev, cs) { let lo = 0, hi = ev.length - 1, ans = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (ev[m][0] <= cs) { ans = m; lo = m + 1; } else hi = m - 1; } return ans; }
+function stateOf(d, e) { const st = e ? d.states[e[4]] : "idle"; const p = st.split("/"); return { mode: p[0] || "idle", part: p[1] || "", style: p[2] || "-", level: p[3] || "-" }; }
+function modeColour(st) { return MODE_COL[st.split("/")[0]] || MODE_COL.idle; }
+const hashOf = (id) => id.replace(/_/g, "-");
+
+// ---------------- song list ----------------
+function buildList() {
+  const nav = $("#list");
+  const byId = Object.fromEntries(P.songs.map((s) => [s.id, s]));
+  const group = (label, songs) => {
+    if (!songs.length) return;
+    const g = document.createElement("div"); g.className = "group"; g.textContent = label; nav.appendChild(g);
+    for (const s of songs) {
+      const b = document.createElement("button"); b.className = "song"; b.dataset.id = s.id;
+      b.innerHTML = '<span class="dot"></span><span class="t"></span>';
+      b.querySelector(".dot").style.background = s.expected === "ballad" ? "var(--ballad)" : "var(--rhythm)";
+      b.querySelector(".t").textContent = s.title;
+      const a = document.createElement("span"); a.className = "a"; a.textContent = s.artist; b.querySelector(".t").append(" ", a);
+      b.title = s.artist + " - " + s.title;
+      b.onclick = () => select(s.id, !SHARE);
+      nav.appendChild(b);
+    }
+  };
+  group("먼저 볼 곡", P.first.map((id) => byId[id]).filter(Boolean));
+  for (const [g, label] of P.genres) group(label, P.songs.filter((s) => s.genre === g));
+}
+
+// ---------------- selecting a song ----------------
+function select(id, play) {
+  const meta = P.songs.find((s) => s.id === id);
+  if (!meta) return;
+  try { history.replaceState(null, "", "#" + hashOf(id)); } catch (e) { /* the hash is a convenience */ }
+  document.querySelectorAll(".song").forEach((b) => b.classList.toggle("on", b.dataset.id === id));
+  $("#title").textContent = meta.title;
+  const bpm = meta.bpm ? " · 기준 템포 " + Math.round(+meta.bpm) + " BPM" : "";
+  $("#meta").textContent = meta.artist + " · 이 곡은 " + (EXPECT_KO[meta.expected] || meta.expected) + "로 보여야 함"
+    + (meta.certainty === "judgement" ? " (판단 나름)" : "") + bpm;
+  $("#note").textContent = (meta.note ? meta.note + " · " : "") + P.note;
+  $("#err").hidden = true;
+  if (FILE_MODE) { stopCountdown(); clockPlayer.pause(); clockPlayer.dur = meta.duration; clockPlayer.seek(0); lastYt = -1; }
+  else if (SHARE) ytPlayer.load(meta.yt);
+  else { audio.src = P.audioRel + "/" + id + "." + (P.audioExt || "m4a"); audio.load(); if (play) player.play(); }
+  showCredit(meta);
+  const go = () => setup(meta, window.PREVIEW_DATA[id]);
+  if (window.PREVIEW_DATA[id]) go();
+  else {
+    cur = null; clearViews();
+    const sc = document.createElement("script"); sc.src = "data/" + id + ".js"; sc.onload = go;
+    sc.onerror = () => showErr("조명 데이터(data/" + id + ".js)를 못 읽었어요. preview.sh를 다시 돌려 주세요.");
+    document.head.appendChild(sc);
+  }
+}
+
+/** Freely licensed songs (the public demo): the attribution right by the play controls, as CC BY asks. */
+function showCredit(meta) {
+  const c = $("#credit");
+  c.textContent = "";
+  c.hidden = !meta.credit;
+  if (!meta.credit) return;
+  c.append("♪ " + meta.credit);
+  const link = (href, text) => { const a = document.createElement("a"); a.href = href; a.textContent = text; a.target = "_blank"; a.rel = "noopener"; return a; };
+  if (meta.licence) { c.append(" · "); c.append(link("https://creativecommons.org/licenses/by/4.0/", meta.licence)); }
+  if (meta.source) { c.append(" · "); c.append(link(meta.source, "원본 페이지")); }
+}
+function showErr(msg) { const e = $("#err"); e.textContent = msg; e.hidden = false; }
+if (!SHARE) {
+  audio.addEventListener("error", () => showErr("음원 파일을 못 열었어요 (" + P.audioRel + "). 파일이 없으면 미리보기도 볼 수 없어요."));
+  audio.addEventListener("loadedmetadata", () => { if (cur && isFinite(audio.duration) && Math.abs(audio.duration - cur.dur) > 0.5) { cur.dur = audio.duration; drawOverviews(); placeMarkers(); } });
+}
+
+function clearViews() { $("#doors").innerHTML = ""; $("#overview").innerHTML = ""; $("#zoom").innerHTML = ""; $("#marks").innerHTML = ""; doors = []; ovCanvases = []; zmCanvases = []; playheads = []; }
+
+function setup(meta, data) {
+  clearViews();
+  cur = { meta, data, dur: !SHARE && isFinite(audio.duration) && audio.duration > 0 ? audio.duration : meta.duration };
+  const doorsEl = $("#doors"), ov = $("#overview"), zm = $("#zoom");
+  V.forEach((v, i) => {
+    const d = data.versions[v], st = d.stats || {};
+    const el = document.createElement("div"); el.className = "door";
+    el.innerHTML = '<div class="panel"><div class="trim"></div><div class="wash up"></div><div class="wash"></div><div class="strip"></div><div class="handle"></div><div class="arm"></div><div class="spkwash"></div><div class="spk"><div class="ring"></div></div></div>'
+      + '<div class="info"><div class="ver"><b></b><span></span></div><div class="state"></div><div class="detail"></div><div class="stats"></div></div>';
+    el.querySelector(".ver b").textContent = v;
+    el.querySelector(".ver span").textContent = P.tags[i] || "";
+    el.querySelector(".stats").textContent = st.colourPerMin == null ? "" :
+      "곡 전체: 색 변화 " + st.colourPerMin + "/분 · 흰색 " + st.whitePerMin + "/분 · 밝기 보통 " + st.b50 + " (" + st.b10 + "~" + st.b90 + ")";
+    doorsEl.appendChild(el);
+    doors.push({ ev: d.ev, strip: el.querySelector(".strip"), ring: el.querySelector(".ring"), spkwash: el.querySelector(".spkwash"), washes: el.querySelectorAll(".wash"), state: el.querySelector(".state"),
+      detail: el.querySelector(".detail"), disp: null, lastIdx: -2 });
+
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = '<div class="lab"></div><div style="position:relative"><canvas></canvas><div class="head-bar"></div></div>';
+    row.querySelector(".lab").append(v);
+    if (P.tags[i]) { const s = document.createElement("span"); s.textContent = P.tags[i]; row.querySelector(".lab").appendChild(s); }
+    ov.appendChild(row);
+    const c = row.querySelector("canvas"); ovCanvases.push(c); playheads.push(row.querySelector(".head-bar"));
+    seekOn(c);
+
+    const zr = document.createElement("div"); zr.className = "row";
+    zr.innerHTML = '<div class="lab"></div><canvas></canvas>';
+    zr.querySelector(".lab").append(v);
+    zm.appendChild(zr); zmCanvases.push(zr.querySelector("canvas"));
+  });
+  if (!P.noMarkers) {
+    const mr = document.createElement("div"); mr.className = "row";
+    mr.innerHTML = '<div class="lab">확인할 곳</div><div class="mrow" id="mrow"></div>';
+    ov.appendChild(mr);
+  }
+  drawOverviews(); placeMarkers();
+
+  const ol = $("#marks");
+  if (P.noMarkers) { $("#marksTitle").hidden = true; ol.hidden = true; }
+  else if (!meta.markers.length) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "따로 표시한 곳은 없어요. 처음부터 들어 보세요."; ol.appendChild(li); }
+  meta.markers.forEach(([t, text], k) => {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="n"></span><span></span>';
+    li.querySelector(".n").textContent = (k + 1) + ". " + clock(t);
+    li.lastChild.textContent = text;
+    li.onclick = () => jump(t);
+    ol.appendChild(li);
+  });
+}
+
+/** Play from 3 s before the place (a file page stops there instead, to line YouTube up again). */
+function jump(t) { stopCountdown(); player.seek(Math.max(0, t - 3)); if (FILE_MODE) player.pause(); else player.play(); }
+let countTimer = null;
+function stopCountdown() { if (countTimer) { clearInterval(countTimer); countTimer = null; $("#count").textContent = "3초 뒤 시작"; } }
+
+function placeMarkers() {
+  const mrow = $("#mrow"); if (!mrow || !cur) return;
+  mrow.innerHTML = "";
+  cur.meta.markers.forEach(([t, text], k) => {
+    const b = document.createElement("button"); b.className = "mk"; b.textContent = k + 1; b.title = clock(t) + "  " + text;
+    b.style.left = (100 * t / cur.dur) + "%"; b.onclick = () => jump(t);
+    mrow.appendChild(b);
+  });
+}
+
+function seekOn(c) {
+  let down = false;
+  const go = (e) => { if (!cur) return; const r = c.getBoundingClientRect(); player.seek(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * cur.dur); };
+  c.addEventListener("pointerdown", (e) => { down = true; c.setPointerCapture(e.pointerId); go(e); });
+  c.addEventListener("pointermove", (e) => { if (down) go(e); });
+  c.addEventListener("pointerup", () => { down = false; });
+}
+
+// ---------------- drawing ----------------
+function sizeCanvas(c) {
+  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); return [ctx, w, h];
+}
+
+/** Bars from t0 to t1 (s): height = brightness, colour = light colour, a mode band underneath. */
+function drawSpan(ctx, d, ev, t0, t1, w, h, band) {
+  const top = 3, bh = h - band - top - 2, x = (t) => (t - t0) / (t1 - t0) * w;
+  let i = Math.max(0, find(ev, Math.floor(t0 * 100)));
+  for (; i < ev.length; i++) {
+    const s = ev[i][0] / 100; if (s > t1) break;
+    const e = i + 1 < ev.length ? ev[i + 1][0] / 100 : cur.dur;
+    if (e < t0) continue;
+    const x0 = Math.max(0, x(s)), x1 = Math.min(w, x(e)), ww = Math.max(x1 - x0, 0.7);
+    const b = ev[i][1], col = d.colours[ev[i][2]];
+    if (b > 0 && col) {
+      const hh = bh * (0.12 + 0.88 * b / 10);
+      ctx.globalAlpha = 0.3 + 0.7 * intensity(b); ctx.fillStyle = col; ctx.fillRect(x0, top + bh - hh, ww, hh);
+    }
+    ctx.globalAlpha = 1; ctx.fillStyle = modeColour(d.states[ev[i][4]]); ctx.fillRect(x0, h - band, ww, band);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawOverviews() {
+  if (!cur) return;
+  ovCanvases.forEach((c, k) => {
+    const [ctx, w, h] = sizeCanvas(c);
+    ctx.clearRect(0, 0, w, h);
+    drawSpan(ctx, cur.data, cur.data.versions[V[k]].ev, 0, cur.dur, w, h, 6);
+    ctx.fillStyle = "#ffffff22";
+    for (let m = 30; m < cur.dur; m += 30) ctx.fillRect(Math.round(m / cur.dur * w), 0, 1, h - 6);
+  });
+}
+
+const WIN = 6;
+function drawZoom(t) {
+  zmCanvases.forEach((c, k) => {
+    const [ctx, w, h] = sizeCanvas(c);
+    ctx.clearRect(0, 0, w, h);
+    drawSpan(ctx, cur.data, cur.data.versions[V[k]].ev, t - WIN, t + WIN, w, h, 4);
+    ctx.fillStyle = "#ffffff1c";
+    for (let s = Math.ceil(t - WIN); s <= t + WIN; s++) ctx.fillRect(Math.round((s - t + WIN) / (2 * WIN) * w), 0, 1, h - 4);
+    ctx.fillStyle = "#fff"; ctx.fillRect(Math.round(w / 2) - 1, 0, 2, h);
+  });
+}
+
+// ---------------- the door light ----------------
+const FADE_TAU = 0.3;   // the car's own fade (USM 0x72) roughly: ~1 s to settle (approximation)
+function updateDoor(dr, d, t, dt) {
+  const i = find(dr.ev, Math.floor(t * 100)), e = i >= 0 ? dr.ev[i] : null;
+  const b = e ? e[1] : -1, col = e && e[1] >= 0 ? d.colours[e[2]] : "", fade = e ? e[3] : 0;
+  const tgt = rgb(col).concat([col ? intensity(b) : 0]);
+  if (!dr.disp || !fade) dr.disp = tgt.slice();
+  else { const k = 1 - Math.exp(-dt / FADE_TAU); for (let j = 0; j < 4; j++) dr.disp[j] += (tgt[j] - dr.disp[j]) * k; }
+  const [r, g, bl, I] = dr.disp;
+  if (I < 0.01) {
+    dr.strip.style.background = "#1d1e21"; dr.strip.style.boxShadow = "none"; dr.strip.style.opacity = 1; dr.washes.forEach((x) => (x.style.opacity = 0));
+    dr.ring.style.borderColor = "#1d1e21"; dr.ring.style.boxShadow = "none"; dr.spkwash.style.opacity = 0;
+  }
+  else {
+    const mix = 0.28 * I, core = [r, g, bl].map((v) => Math.round(v + (255 - v) * mix));
+    const c = Math.round(r) + "," + Math.round(g) + "," + Math.round(bl);
+    dr.strip.style.background = "rgb(" + core.join(",") + ")";
+    dr.strip.style.opacity = 0.35 + 0.65 * I;
+    dr.strip.style.boxShadow = "0 0 " + (5 + 10 * I).toFixed(1) + "px " + (1 + 3 * I).toFixed(1) + "px rgba(" + c + "," + (0.45 + 0.55 * I).toFixed(2) + "),"
+      + "0 0 " + (30 + 40 * I).toFixed(0) + "px " + (6 + 10 * I).toFixed(0) + "px rgba(" + c + "," + (0.5 * I).toFixed(2) + ")";
+    dr.washes[0].style.background = "linear-gradient(0deg, rgba(" + c + ",0.5), transparent)";
+    dr.washes[1].style.background = "linear-gradient(180deg, rgba(" + c + ",0.6), transparent 80%)";
+    dr.washes[0].style.opacity = (0.45 * I).toFixed(3); dr.washes[1].style.opacity = (0.6 * I).toFixed(3);
+    dr.ring.style.borderColor = "rgba(" + core.join(",") + "," + (0.35 + 0.65 * I).toFixed(2) + ")";
+    dr.ring.style.boxShadow = "0 0 " + (6 + 12 * I).toFixed(1) + "px " + (1 + 3 * I).toFixed(1) + "px rgba(" + c + "," + (0.45 + 0.55 * I).toFixed(2) + "),"
+      + "inset 0 0 " + (6 + 10 * I).toFixed(1) + "px rgba(" + c + "," + (0.5 * I).toFixed(2) + ")";
+    dr.spkwash.style.background = "radial-gradient(circle, rgba(" + c + ",0.55) 0 40%, transparent 70%)";
+    dr.spkwash.style.opacity = (0.5 * I).toFixed(3);
+  }
+  if (i !== dr.lastIdx) {
+    dr.lastIdx = i;
+    const st = stateOf(d, e);
+    if (st.mode === "idle") { dr.state.textContent = "소리 없음"; dr.detail.textContent = ""; }
+    else {
+      dr.state.textContent = (MODE_KO[st.mode] || st.mode) + " · " + (PART_KO[st.part] || st.part);
+      dr.detail.textContent = "스타일 " + (STYLE_KO[st.style] || st.style) + " · " + (LEVEL_KO[st.level] || st.level)
+        + " · 밝기 " + (b < 0 ? "—" : b === 0 ? "0 (꺼짐)" : b) + " · 페이드 " + (fade ? "켬" : "끔");
+    }
+  }
+}
+
+let lastT = performance.now(), lastPaused = null, lastSec = -1, lastYt = -1, renderMode = false;
+// render mode: preview/record.py steps the time itself, frame by frame (no audio, no clock)
+window.__enterRender = () => { renderMode = true; document.body.classList.add("render"); drawOverviews(); return !!cur; };
+window.__renderAt = (t, dt) => {
+  if (!cur) return false;
+  doors.forEach((dr) => updateDoor(dr, cur.data, t, dt));
+  playheads.forEach((p) => (p.style.left = (100 * Math.max(0, t) / cur.dur) + "%"));
+  drawZoom(t);
+  $("#rtime").textContent = cur.meta.artist + "  ·  " + clock(t).replace(/\.\d$/, "") + " / " + clock(cur.dur).replace(/\.\d$/, "");
+  return true;
+};
+function frame(now) {
+  const dt = Math.min(0.2, (now - lastT) / 1000); lastT = now;
+  if (cur && !renderMode) {
+    const t = player.time() - lagMs / 1000;
+    doors.forEach((dr) => updateDoor(dr, cur.data, t, dt));
+    playheads.forEach((p) => (p.style.left = (100 * Math.max(0, t) / cur.dur) + "%"));
+    drawZoom(t);
+    if (SHARE) {
+      const sec = Math.floor(Math.max(0, t));
+      if (sec !== lastSec) { lastSec = sec; $("#time").textContent = clock(sec).replace(/\.\d$/, "") + " / " + clock(cur.dur).replace(/\.\d$/, ""); }
+      const paused = player.paused();
+      if (paused !== lastPaused) { lastPaused = paused; $("#pp").textContent = paused ? "▶ 재생" : "❚❚ 정지"; }
+      if (FILE_MODE && clockPlayer.on && clockPlayer.time() >= cur.dur) clockPlayer.pause();
+      if (FILE_MODE && sec !== lastYt && cur.meta.yt) {
+        lastYt = sec;
+        $("#ytl").href = "https://www.youtube.com/watch?v=" + encodeURIComponent(cur.meta.yt) + (sec > 0 ? "&t=" + sec + "s" : "");
+        $("#ytl").textContent = "유튜브에서 듣기 · " + clock(sec).replace(/\.\d$/, "") + "부터 ↗";
+      }
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------------- controls ----------------
+if (FILE_MODE) {
+  audio.hidden = true; $("#ctl").hidden = false; $("#filectl").hidden = false; $("#howto").hidden = false;
+  $("#pp").onclick = () => { stopCountdown(); toggle(); };
+  $("#back").onclick = () => player.seek(player.time() - 0.1);
+  $("#fwd").onclick = () => player.seek(player.time() + 0.1);
+  $("#count").onclick = () => {
+    if (countTimer) { stopCountdown(); return; }
+    player.pause();
+    let n = 3; $("#count").textContent = n + "…";
+    countTimer = setInterval(() => { n--; if (n > 0) $("#count").textContent = n + "…"; else { stopCountdown(); player.play(); } }, 1000);
+  };
+} else if (SHARE) {
+  audio.hidden = true; $("#ytwrap").hidden = false; $("#ctl").hidden = false;
+  $("#pp").onclick = toggle;
+  const api = document.createElement("script"); api.src = "https://www.youtube.com/iframe_api";
+  api.onerror = () => showErr("유튜브 플레이어를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.");
+  document.head.appendChild(api);
+}
+{
+  const lag = $("#lag"), lagv = $("#lagv");
+  lag.value = lagMs; lagv.textContent = lagMs + " ms";
+  lag.oninput = () => { lagMs = +lag.value; lagv.textContent = lagMs + " ms"; try { localStorage.setItem("lightPreviewLagMs", lagMs); } catch (e) { /* per-viewer convenience */ } };
+}
+if (P.heading) { $("#heading").textContent = P.heading; }
+if (P.intro) { $("#intro").textContent = P.intro; }
+document.addEventListener("keydown", (e) => {
+  if (e.target && (e.target.tagName === "INPUT" || e.target === audio)) return;
+  if (e.code === "Space") { e.preventDefault(); stopCountdown(); toggle(); }
+  else if (e.code === "ArrowLeft") player.seek(player.time() - 5);
+  else if (e.code === "ArrowRight") player.seek(player.time() + 5);
+  else if (FILE_MODE && e.code === "Comma") player.seek(player.time() - 0.1);
+  else if (FILE_MODE && e.code === "Period") player.seek(player.time() + 0.1);
+});
+window.addEventListener("resize", drawOverviews);
+
+buildList();
+// #id (underscores as hyphens) or, on the local page, #id@seconds (opens the song at that moment)
+const [startHash, startAt] = decodeURIComponent(location.hash.slice(1)).split("@");
+const startSong = P.songs.find((s) => s.id === startHash || hashOf(s.id) === startHash);
+select(startSong ? startSong.id : (P.first[0] || P.songs[0].id), false);
+if (startAt && isFinite(+startAt)) {
+  if (FILE_MODE) player.seek(+startAt);
+  else if (SHARE) { const go = () => (ytPlayer.ready ? player.seek(+startAt) : setTimeout(go, 300)); go(); }
+  else if (audio.readyState >= 1) player.seek(+startAt);
+  else audio.addEventListener("loadedmetadata", () => player.seek(+startAt), { once: true });
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
